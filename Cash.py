@@ -13,6 +13,7 @@ DATA_FILE = "cash_balances.json"
 STARTING_BALANCE = 100
 WORK_REWARD = 5
 intents = discord.Intents.default()
+intents.message_content = True  # Necesario para leer comandos con prefijo como ,work y ,help
 bot = commands.Bot(command_prefix=",", intents=intents, help_command=None)
 balances = {}
 blocked_until = {}
