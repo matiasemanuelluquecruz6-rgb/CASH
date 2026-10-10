@@ -17,23 +17,25 @@ intents.message_content = True  # Necesario para leer comandos con prefijo como 
 bot = commands.Bot(command_prefix=",", intents=intents, help_command=None)
 balances = {}
 blocked_until = {}
+msj_channels = {}
 lock = asyncio.Lock()
 
 
 def load_data():
-    global balances, blocked_until
+    global balances, blocked_until, msj_channels
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             saved = json.load(f)
         balances = saved.get("balances", {})
         blocked_until = saved.get("blocked_until", {})
+        msj_channels = saved.get("msj_channels", {})
     except (FileNotFoundError, json.JSONDecodeError, AttributeError):
-        balances, blocked_until = {}, {}
+        balances, blocked_until, msj_channels = {}, {}, {}
 
 
 def save_data():
     with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump({"balances": balances, "blocked_until": blocked_until}, f, indent=2)
+        json.dump({"balances": balances, "blocked_until": blocked_until, "msj_channels": msj_channels}, f, indent=2)
 
 
 load_data()
@@ -287,6 +289,90 @@ async def cashmoney(interaction: discord.Interaction, usuario: discord.User, can
     await interaction.response.send_message(embed=embed("♾️ Dinero generado", f"Se añadieron **{cantidad} monedas** a {usuario.mention}. Nuevo saldo: **{new_amount}**."))
 
 
+
+
+# /msj — activa/desactiva avisos de mensajes eliminados en el canal actual
+@bot.tree.command(name="msj", description="Activa o desactiva avisos de mensajes eliminados en este canal.")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def msj(interaction: discord.Interaction):
+    if interaction.guild is None or interaction.channel is None:
+        await interaction.response.send_message(
+            embed=embed("❌ No disponible", "Usa este comando dentro de un servidor."),
+            ephemeral=True,
+        )
+        return
+
+    guild_key = str(interaction.guild.id)
+    channel_id = str(interaction.channel.id)
+    channels = msj_channels.setdefault(guild_key, [])
+
+    if channel_id in channels:
+        channels.remove(channel_id)
+        enabled = False
+    else:
+        channels.append(channel_id)
+        enabled = True
+    save_data()
+
+    if enabled:
+        description = (
+            f"Los avisos de mensajes eliminados están **activados** en {interaction.channel.mention}.\\n"
+            "El bot intentará indicar quién borró el mensaje y quién lo había enviado. "
+            "Para identificar al autor de la eliminación, necesita el permiso **Ver registro de auditoría**."
+        )
+        title = "🟢 Registro activado"
+    else:
+        description = f"Los avisos de mensajes eliminados están **desactivados** en {interaction.channel.mention}."
+        title = "⚪ Registro desactivado"
+
+    await interaction.response.send_message(embed=embed(title, description), ephemeral=True)
+
+
+@bot.event
+async def on_message_delete(message: discord.Message):
+    if message.guild is None:
+        return
+    configured = msj_channels.get(str(message.guild.id), [])
+    if str(message.channel.id) not in configured:
+        return
+
+    # Los mensajes sin autor conocido o de bots no necesitan aviso.
+    if message.author is None:
+        return
+
+    deleter_text = "No se pudo identificar quién lo eliminó"
+    try:
+        now = discord.utils.utcnow()
+        async for entry in message.guild.audit_logs(
+            limit=8,
+            action=discord.AuditLogAction.message_delete,
+        ):
+            if entry.target and entry.target.id == message.author.id:
+                extra_channel = getattr(entry.extra, "channel", None)
+                age = (now - entry.created_at).total_seconds()
+                if extra_channel and extra_channel.id == message.channel.id and age <= 8:
+                    deleter_text = f"{entry.user.mention} eliminó el mensaje"
+                    break
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+    content = message.content.strip() if message.content else ""
+    if not content:
+        content = "(sin texto; podría contener una imagen, archivo o inserción)"
+    if len(content) > 900:
+        content = content[:900] + "…"
+
+    await message.channel.send(
+        embed=embed(
+            "🗑️ Mensaje eliminado",
+            f"**Quién lo eliminó:** {deleter_text}\\n"
+            f"**Autor del mensaje:** {message.author.mention}\\n"
+            f"**Canal:** {message.channel.mention}\\n"
+            f"**Contenido:**\\n> {content}",
+        )
+    )
+
+
 # /help and ,help
 HELP_TEXT = ("**/work** o **,work** — ganas 5 monedas.\n"
              "**/balance** o **,balance** — consulta saldo.\n"
@@ -294,6 +380,7 @@ HELP_TEXT = ("**/work** o **,work** — ganas 5 monedas.\n"
              "**/roll** o **,roll** — apuestas con tablero.\n"
              "**/crime** o **,crime** — intentas robar.\n"
              "**/top** o **,top** — top 10.\n"
+             "**/msj** — activa/desactiva avisos de mensajes eliminados en el canal; requiere Gestionar mensajes.\n"
              "**/help** o **,help** — muestra esta ayuda.\n"
              "**/cashmoney** — genera monedas; solo el creador puede usarlo.")
 
